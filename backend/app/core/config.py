@@ -37,6 +37,8 @@ class Settings(BaseSettings):
         alias="SECRET_KEY",
     )
     encryption_key: str = Field(default="", alias="ENCRYPTION_KEY")
+    encryption_key_version: str = Field(default="v1", alias="ENCRYPTION_KEY_VERSION")
+    encryption_previous_keys: str = Field(default="", alias="ENCRYPTION_PREVIOUS_KEYS")
     access_token_expire_minutes: int = Field(default=60, ge=5, le=10080, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
 
     storage_dir: str = Field(default="../storage", alias="STORAGE_DIR")
@@ -56,6 +58,37 @@ class Settings(BaseSettings):
         alias="BROWSER_SUBMISSION_REQUIRES_APPROVAL",
     )
     pause_all_submissions: bool = Field(default=False, alias="PAUSE_ALL_SUBMISSIONS")
+    approval_ttl_hours: int = Field(default=24, ge=1, le=720, alias="APPROVAL_TTL_HOURS")
+    application_artifact_retention_days: int = Field(
+        default=14,
+        ge=1,
+        le=365,
+        alias="APPLICATION_ARTIFACT_RETENTION_DAYS",
+    )
+    browser_execution_timeout_seconds: int = Field(
+        default=60,
+        ge=10,
+        le=600,
+        alias="BROWSER_EXECUTION_TIMEOUT_SECONDS",
+    )
+    browser_handoff_ttl_seconds: int = Field(
+        default=1800,
+        ge=60,
+        le=7200,
+        alias="BROWSER_HANDOFF_TTL_SECONDS",
+    )
+    capture_application_artifacts: bool = Field(
+        default=False,
+        alias="CAPTURE_APPLICATION_ARTIFACTS",
+    )
+    require_os_egress_firewall: bool = Field(
+        default=False,
+        alias="REQUIRE_OS_EGRESS_FIREWALL",
+    )
+    os_egress_firewall_rule_prefix: str = Field(
+        default="ApplyPilot-Browser-Egress",
+        alias="OS_EGRESS_FIREWALL_RULE_PREFIX",
+    )
 
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":
@@ -68,6 +101,14 @@ class Settings(BaseSettings):
                     "SECRET_KEY must be at least 32 characters and not a default/placeholder value in production"
                 )
         return self
+
+    def validate_encryption_configured(self) -> None:
+        """Fail-closed check that ENCRYPTION_KEY is configured and non-placeholder."""
+        enc = self.encryption_key.strip()
+        if len(enc) < 16 or any(marker in enc.lower() for marker in _INSECURE_SECRET_MARKERS):
+            raise ValueError(
+                "ENCRYPTION_KEY must be configured (>= 16 chars, non-placeholder)"
+            )
 
 
 @lru_cache
