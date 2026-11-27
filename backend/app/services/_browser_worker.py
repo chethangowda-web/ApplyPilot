@@ -401,11 +401,23 @@ def prefill_page_safely(
     resume_attached = False
     expected_fields: dict[str, list[str]] = {}
     expected_file_fields: dict[str, str] = {}
+    field_metadata: dict[str, dict[str, Any]] = {}
     live_resume_sha = hashlib.sha256(resume_bytes).hexdigest()
 
     for f in detected_fields:
         loc = page.locator(f.selector).first
         ctrl_name = str(loc.evaluate("el => (el.getAttribute('name') || '').trim()") or "")
+        if ctrl_name:
+            field_metadata[ctrl_name] = {
+                "label": f.label,
+                "question_key": f.question_key,
+                "field_type": f.field_type,
+                "input_type": str(loc.evaluate("el => (el.getAttribute('type') || '').trim().toLowerCase()") or ""),
+                "autocomplete": str(
+                    loc.evaluate("el => (el.getAttribute('autocomplete') || '').trim().toLowerCase()") or ""
+                ),
+                "is_sensitive": classify_sensitive_question(f.label, f.question_key) is not None,
+            }
         if f.field_type == "file":
             loc.set_input_files(
                 {
@@ -491,6 +503,7 @@ def prefill_page_safely(
         expected_fields=expected_fields,
         expected_file_fields=expected_file_fields,
         allowed_csrf_tokens=baseline_csrf_raw,
+        field_metadata=field_metadata,
     )
 
     if egress_timeout_pause_ms > 0:

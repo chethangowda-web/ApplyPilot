@@ -26,6 +26,7 @@ from urllib.parse import parse_qsl, urljoin, urlparse
 
 from playwright.sync_api import Browser, BrowserContext, Route, WebSocketRoute
 
+from app.agents.application.form_understanding import classify_sensitive_question
 from app.connectors.base import BlockedSourceError, assert_permitted_url
 from app.core.config import Settings, get_settings
 from app.core.security import decrypt_sensitive_answer
@@ -42,6 +43,7 @@ from app.schemas.applications import (
     FieldFillOutcome,
     HandoffSessionInfo,
     ManualSubmitAuthorizationRequest,
+    PendingSubmissionFieldPreview,
     PendingSubmissionInfo,
     compute_answers_hash,
     compute_approval_snapshot_hash,
@@ -1520,6 +1522,191 @@ class _HeldPendingSubmission:
     payload_sha256: str
     detected_at: datetime
     expires_at: datetime
+    captured_fields: list[PendingSubmissionFieldPreview] = field(default_factory=list)
+
+
+_EXTRA_SENSITIVE_WIRE_KEYWORDS: tuple[str, ...] = (
+    "national insurance",
+    "nino",
+    "tax id",
+    "tax_id",
+    "tin",
+    "ssn",
+    "social security",
+    "aadhaar",
+    "passport",
+    "date of birth",
+    "birth date",
+    "birthday",
+    "dob",
+    "bday",
+    "work authorization",
+    "authorized to work",
+    "visa",
+    "sponsorship",
+    "citizenship",
+    "phone",
+    "mobile",
+    "telephone",
+    "email",
+    "address",
+    "street",
+    "postal",
+    "zip code",
+    "zipcode",
+    "residence",
+    "salary",
+    "compensation",
+    "secret",
+    "token",
+    "password",
+)
+
+_SENSITIVE_INPUT_TYPES: frozenset[str] = frozenset({"password", "email", "tel", "date"})
+_SENSITIVE_AUTOCOMPLETE_VALUES: frozenset[str] = frozenset(
+    {
+        "bday",
+        "bday-day",
+        "bday-month",
+        "bday-year",
+        "email",
+        "tel",
+        "tel-national",
+        "tel-local",
+        "street-address",
+        "address-line1",
+        "address-line2",
+        "postal-code",
+        "cc-number",
+        "one-time-code",
+        "new-password",
+        "current-password",
+    }
+)
+_SAFE_NON_SENSITIVE_FIELD_KEYS: frozenset[str] = frozenset(
+    {
+        "full_name",
+        "name",
+        "first_name",
+        "last_name",
+        "linkedin",
+        "linkedin_url",
+        "github",
+        "github_url",
+        "portfolio",
+        "portfolio_url",
+        "website",
+        "location",
+        "city",
+        "why_company",
+        "cover_letter",
+        "summary",
+        "skills",
+    }
+)
+
+
+def _is_wire_field_sensitive(
+    field_name: str,
+    meta: dict[str, Any] | None,
+    *,
+    has_form_metadata: bool,
+) -> bool:
+    """Classify wire field sensitivity using form metadata and fail-closed defaults."""
+    norm_key = field_name.strip().lower()
+    if norm_key in ALLOWED_CSRF_FIELD_NAMES:
+        return True
+
+    if meta is None:
+        # Unknown/ambiguous field when form metadata was provided -> fail closed
+        if has_form_metadata:
+            return True
+        if classify_sensitive_question(field_name, field_name) is not None:
+            return True
+        if any(kw in norm_key.replace("_", " ") for kw in _EXTRA_SENSITIVE_WIRE_KEYWORDS):
+            return True
+        return norm_key not in _SAFE_NON_SENSITIVE_FIELD_KEYS
+
+    if meta.get("is_sensitive") is True:
+        return True
+    input_type = str(meta.get("input_type") or "").strip().lower()
+    field_type = str(meta.get("field_type") or "").strip().lower()
+    autocomplete = str(meta.get("autocomplete") or "").strip().lower()
+    if input_type in _SENSITIVE_INPUT_TYPES or field_type in _SENSITIVE_INPUT_TYPES:
+        return True
+    if autocomplete in _SENSITIVE_AUTOCOMPLETE_VALUES:
+        return True
+
+    label = str(meta.get("label") or "").strip()
+    qkey = str(meta.get("question_key") or "").strip()
+    combined = " ".join(p for p in (field_name, label, qkey, autocomplete) if p).lower()
+    if classify_sensitive_question(combined, qkey or field_name) is not None:
+        return True
+    combined_spaced = combined.replace("_", " ").replace("-", " ")
+    if any(kw in combined_spaced for kw in _EXTRA_SENSITIVE_WIRE_KEYWORDS):
+        return True
+
+    # If neither label nor key is recognized as non-sensitive, fail closed
+    if not label and norm_key not in _SAFE_NON_SENSITIVE_FIELD_KEYS:
+        return True
+    return False
+
+
+def _build_captured_field_previews(
+    *,
+    text_fields: dict[str, list[str]],
+    file_checksums: dict[str, str],
+    field_metadata: dict[str, dict[str, Any]] | None = None,
+) -> list[PendingSubmissionFieldPreview]:
+    """Build masked field-by-field preview strictly from parsed wire request payloads."""
+    previews: list[PendingSubmissionFieldPreview] = []
+    meta_map = field_metadata or {}
+    has_form_metadata = bool(meta_map)
+    for key in sorted(text_fields.keys()):
+        vals = text_fields[key]
+        if key.lower() in ALLOWED_CSRF_FIELD_NAMES:
+            previews.append(
+                PendingSubmissionFieldPreview(
+                    field_name=key,
+                    field_kind="csrf_token",
+                    is_sensitive=True,
+                    value_preview="[CSRF TOKEN REDACTED]",
+                    value_count=len(vals),
+                )
+            )
+        elif _is_wire_field_sensitive(key, meta_map.get(key), has_form_metadata=has_form_metadata):
+            previews.append(
+                PendingSubmissionFieldPreview(
+                    field_name=key,
+                    field_kind="text",
+                    is_sensitive=True,
+                    value_preview="[REDACTED — SENSITIVE OR AMBIGUOUS WIRE VALUE]",
+                    value_count=len(vals),
+                )
+            )
+        else:
+            joined = "; ".join(v[:200] for v in vals)
+            previews.append(
+                PendingSubmissionFieldPreview(
+                    field_name=key,
+                    field_kind="text",
+                    is_sensitive=False,
+                    value_preview=joined,
+                    value_count=len(vals),
+                )
+            )
+    for fkey in sorted(file_checksums.keys()):
+        previews.append(
+            PendingSubmissionFieldPreview(
+                field_name=fkey,
+                field_kind="file",
+                is_sensitive=False,
+                value_preview=None,
+                file_sha256=file_checksums[fkey],
+                value_count=1,
+            )
+        )
+    return previews
 
 
 class SubmitGuardState:
@@ -1538,6 +1725,7 @@ class SubmitGuardState:
         self._expected_fields: dict[str, list[str]] = {}
         self._expected_file_fields: dict[str, str] = {}
         self._allowed_csrf_tokens: dict[str, str] = {}
+        self._field_metadata: dict[str, dict[str, Any]] = {}
         self._live_answers_hash: str = ""
         self._live_resume_checksum: str = ""
         self._live_approval_snapshot_hash: str = ""
@@ -1565,11 +1753,13 @@ class SubmitGuardState:
         expected_fields: dict[str, list[str]],
         expected_file_fields: dict[str, str] | None = None,
         allowed_csrf_tokens: dict[str, str] | None = None,
+        field_metadata: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """Lock expected wire form fields, uploaded PDF checksum(s), and explicit baseline CSRF tokens."""
         with self._lock:
             self._expected_fields = {k: list(v) for k, v in expected_fields.items()}
             self._expected_file_fields = dict(expected_file_fields or {})
+            self._field_metadata = {k: dict(v) for k, v in (field_metadata or {}).items()}
             filtered_csrf: dict[str, str] = {}
             for k, v in (allowed_csrf_tokens or {}).items():
                 if k.lower() in ALLOWED_CSRF_FIELD_NAMES and str(v).strip():
@@ -1585,6 +1775,22 @@ class SubmitGuardState:
         headers: dict[str, str],
         post_data_buffer: bytes | None,
     ) -> str | None:
+        payload_sha256, _previews = self._inspect_wire_payload_locked(
+            url=url,
+            method=method,
+            headers=headers,
+            post_data_buffer=post_data_buffer,
+        )
+        return payload_sha256
+
+    def _inspect_wire_payload_locked(
+        self,
+        *,
+        url: str,
+        method: str,
+        headers: dict[str, str],
+        post_data_buffer: bytes | None,
+    ) -> tuple[str | None, list[PendingSubmissionFieldPreview]]:
         try:
             text_fields, file_checksums, wire_bytes = parse_submitted_request_payload(
                 url=url,
@@ -1593,7 +1799,7 @@ class SubmitGuardState:
                 post_data_buffer=post_data_buffer,
             )
         except SubmitBlockedViolationError:
-            return None
+            return None, []
 
         payload_sha256 = hashlib.sha256(wire_bytes).hexdigest()
 
@@ -1602,17 +1808,23 @@ class SubmitGuardState:
             act_q = urlparse(self._detected_form_action).query
             req_q = urlparse(url).query
             if req_q and req_q != act_q:
-                return None
+                return None, []
+
+        previews = _build_captured_field_previews(
+            text_fields=text_fields,
+            file_checksums=file_checksums,
+            field_metadata=self._field_metadata,
+        )
 
         if not self._payload_policy_configured:
-            return payload_sha256
+            return payload_sha256, previews
 
         # Strict verify every file input uploaded
         if set(file_checksums.keys()) != set(self._expected_file_fields.keys()):
-            return None
+            return None, []
         for fkey, fsha in self._expected_file_fields.items():
             if not hmac.compare_digest(file_checksums.get(fkey, ""), fsha):
-                return None
+                return None, []
 
         # Every expected approved field MUST match strictly; only explicit baseline CSRF tokens permitted additionally
         seen_expected: set[str] = set()
@@ -1620,18 +1832,18 @@ class SubmitGuardState:
             if k in self._expected_fields:
                 exp_vals = self._expected_fields[k]
                 if len(vals) != len(exp_vals) or not all(hmac.compare_digest(a, b) for a, b in zip(vals, exp_vals)):
-                    return None
+                    return None, []
                 seen_expected.add(k)
             elif k in self._allowed_csrf_tokens and k.lower() in ALLOWED_CSRF_FIELD_NAMES:
                 if len(vals) != 1 or not hmac.compare_digest(vals[0], self._allowed_csrf_tokens[k]):
-                    return None
+                    return None, []
             else:
-                return None
+                return None, []
 
         if seen_expected != set(self._expected_fields.keys()):
-            return None
+            return None, []
 
-        return payload_sha256
+        return payload_sha256, previews
 
     def set_live_bindings(
         self,
@@ -1755,7 +1967,7 @@ class SubmitGuardState:
             except Exception:
                 hdrs = {}
                 post_buf = None
-            payload_sha256 = self._verify_wire_payload_locked(
+            payload_sha256, captured_fields = self._inspect_wire_payload_locked(
                 url=url,
                 method=norm_method,
                 headers=hdrs,
@@ -1786,6 +1998,7 @@ class SubmitGuardState:
                 payload_sha256=payload_sha256,
                 detected_at=current,
                 expires_at=current + timedelta(seconds=hold_ttl_seconds),
+                captured_fields=captured_fields,
             )
             self._pending_submission = held
             return held
@@ -1809,6 +2022,7 @@ class SubmitGuardState:
                         payload_sha256=pend.payload_sha256,
                         detected_at=pend.detected_at,
                         expires_at=pend.expires_at,
+                        captured_fields=list(pend.captured_fields),
                     )
         if stale_route is not None:
             try:

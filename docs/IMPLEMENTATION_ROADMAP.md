@@ -156,3 +156,27 @@ Before enabling live submissions, build a **50–100 representative JD evaluatio
 - **Known Limitations:** Live ATS portal accounts and billed external LLM APIs were not called in CI (validated against local HTTP fixtures, Playwright Chromium, and `httpx.MockTransport` / deterministic fallbacks); `OfficialApiSubmissionAdapter` registry remains intentionally empty until official ATS API credentials/contracts are configured.
 - **Milestone 5 Acceptance Criteria:** **Milestone 5 is officially CLOSED / ACCEPTED.**
 
+## 9. Milestone 7 Verification Status — **CLOSED / ACCEPTED** (2026-11-27)
+
+### Implemented Scope (`apps/web`, `feat/milestone-7-web-frontend`)
+- **Stage 1 — Workflow-First Next.js Architecture & HttpOnly BFF Security (`apps/web/src/app/api/*`, `lib/server-backend.ts`, `lib/workflow-engine.ts`, `components/WorkflowWorkspace.tsx`):**
+  - Built an 11-step guided sequential workflow UI (`WorkflowStepper`, `WorkflowWorkspace`, `WorkflowStageBody`, `MyWorkflowsView`) driven strictly by authoritative backend state (`deriveJobWorkflowState`).
+  - Implemented Next.js BFF session routes (`/api/session/login`, `/api/session/register`, `/api/session/logout`, `/api/session/me`) and allowlisted `/api/backend/[...path]` proxy storing JWTs strictly in `HttpOnly` cookies (`SameSite=Lax`, `Secure` in production, zero `localStorage` tokens), enforcing same-origin CSRF checks on state-changing routes, and preventing open-redirect or path-traversal bypasses.
+- **Stage 2 — Job Discovery & Resume Intelligence (`DiscoverJobsView.tsx`, `Stage5ResumeReview.tsx`):**
+  - Implemented job discovery with search/filters/pagination, eligibility and existing-application detection, JD intelligence extraction, rubric fit scoring, Celery tailored-resume outbox polling/recovery, diff/unsupported-claim inspection, explicit resume approval/rejection, and authenticated `blob:` PDF preview/download without leaking server paths or tokens.
+- **Stage 3 — Application Preparation & Answer Verification (`Stage6To8ApplicationPrep.tsx`):**
+  - Implemented Step 6 (`Stage6PreparePanel` with policy clearance, daily quota display, and disabled/unavailable `official_api` mode enforcement), Step 7 (`Stage7QuestionsPanel` distinguishing **Verified Profile Fact**, **AI Draft (Verify)**, **User Confirmed**, and **Requires Your Input** with masked `type="password"` sensitive inputs and explicit server-side AES-256-GCM encryption), and Step 8 (`Stage8ApprovalPanel` binding target job, destination URL, resume SHA-256 checksum, and verified answers to an immutable `ApprovalRecord`).
+- **Stage 4 — Browser Handoff, Hold-and-Confirm & Additive Captured Request Preview (`Stage9HandoffPanel.tsx`, `HoldAndConfirmPanel.tsx`, `backend/app/schemas/applications.py`, `backend/app/services/browser_executor.py`, `backend/app/services/_browser_worker.py`):**
+  - Built Step 9 (`Stage9HandoffPanel` supporting launch, session status refresh, active-session recovery, safe close, fill outcomes, unsupported fields, and expired/failed session handling without auto-submitting) and Step 10 (`HoldAndConfirmPanel` displaying `pending_submission_id`, `expected_form_action`, `expected_http_method`, `detected_at`, `expires_at`, and mandatory `expected_payload_sha256`).
+  - Added the minimal additive `PendingSubmissionFieldPreview` / `PendingSubmissionInfo.captured_fields` backend extension derived strictly from `parse_submitted_request_payload` wire bytes, using form metadata (`label`, `input_type`, `autocomplete`, `question_key`) with fail-closed masking for sensitive, CSRF, and unknown/ambiguous fields.
+- **Stage 5 — Submission Verification & Application Tracking (`Stage11VerificationPanel.tsx`, `ApplicationsTrackerView.tsx`, `ApplicationDetailTimelineView.tsx`):**
+  - Built Step 11 outcome recording (`submitted_in_browser`, `interrupted`, `failed`) and reconciliation boundary keeping `USER_REPORTED_SUBMITTED`, `UNVERIFIED`, and `CONFIRMED` strictly separate, plus `/applications` tracker with status filters and `/applications/[applicationId]` backend-derived chronological timeline.
+
+### Verification Results (2026-11-27)
+- **Frontend Suite (`apps/web`):** `npm run typecheck`, `npm run lint`, `npm run test` (**8 test files, 33 tests passed**), and `npm run build` all passed cleanly.
+- **Backend Suite (`backend`):** `python -m ruff check app tests alembic` passed (`All checks passed!`); `python -m pytest -q` passed (**119 passed, 0 failed**, including adversarial Hold-and-Confirm & `captured_fields` wire-preview masking tests).
+- **Live Full-Stack E2E (Disposable PostgreSQL, Redis, FastAPI, Celery, Next.js, Local Fixture Employer):** Passed end-to-end across Stages 1–5 including Step 7 provenance/encryption/blocked-approval, Step 9–10 live Hold-and-Confirm release (`0` fixture POSTs before confirmation, `1` after confirmation, `409`/`422`/`404` security rejections), and Step 11 `/applications` tracker + `/applications/{id}` timeline + reload/logout/login persistence.
+- **Remaining Limitations:** Production `_CONFIRMATION_VERIFIER_REGISTRY` remains empty until **Milestone 6** (Gmail OAuth / ATS webhook trusted confirmation integrations); `BrowserHandoffManager` holds live Chromium worker handles in memory per backend process.
+- **Milestone 7 Acceptance Criteria:** **Milestone 7 is officially CLOSED / ACCEPTED.**
+
+
