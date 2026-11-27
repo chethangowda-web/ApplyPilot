@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
+import time
 from typing import Any
 import httpx
 from app.connectors.base import ConnectorError, JobSourceConnector
 from app.schemas.workflow import NormalizedJob
+from app.services.discovery_prefilter import ConnectorScanMetrics, evaluate_job_prefilter
 from app.services.jd_sanitizer import extract_deterministic_job_signals, html_to_clean_text
 
 
@@ -33,6 +35,8 @@ class GreenhouseConnector(JobSourceConnector):
         self.board_token = board_token
         self.company_name = company_name or board_token
         self.base_url = base_url.rstrip("/")
+        self.last_scan_metrics = ConnectorScanMetrics()
+        self._etag: str | None = None
 
     async def search(
         self,
@@ -40,43 +44,126 @@ class GreenhouseConnector(JobSourceConnector):
         location: str | None = None,
         filters: dict[str, Any] | None = None,
     ) -> list[NormalizedJob]:
+        """Fetch Greenhouse public board once (API returns full board; ignores page/per_page) and pre-filter locally."""
+        t0 = time.monotonic()
         filters = filters or {}
-        per_page = int(filters.get("per_page", 100))
+        smart_filter = bool(filters.get("smart_filter", False))
+        per_page = filters.get("per_page")
         max_pages = int(filters.get("max_pages", 5))
+        max_results = int(filters.get("max_results", 50))
+        cursor_offset = int(filters.get("cursor", 0) or 0)
         results: list[NormalizedJob] = []
+        metrics = ConnectorScanMetrics()
 
+        url = f"{self.base_url}/{self.board_token}/jobs"
+        headers: dict[str, str] = {}
+        if filters.get("etag"):
+            headers["If-None-Match"] = str(filters["etag"])
+        elif self._etag:
+            headers["If-None-Match"] = self._etag
+
+        raw_jobs: list[dict[str, Any]] = []
         for page in range(1, max_pages + 1):
-            url = f"{self.base_url}/{self.board_token}/jobs"
+            params: dict[str, Any] = {"content": "true"}
+            if per_page is not None:
+                params["per_page"] = int(per_page)
+                params["page"] = page
             resp = await self._request(
                 "GET",
                 url,
-                params={"content": "true", "per_page": per_page, "page": page},
+                params=params,
+                headers=headers or None,
             )
+            metrics.pages_scanned += 1
+            if resp.status_code == 304:
+                metrics.cache_hit = True
+                metrics.duration_ms = (time.monotonic() - t0) * 1000.0
+                self.last_scan_metrics = metrics
+                return []
             if resp.status_code == 404:
                 raise ConnectorError(f"Greenhouse board not found: {self.board_token}")
             if resp.status_code >= 400:
                 raise ConnectorError(f"Greenhouse error {resp.status_code}")
 
-            payload = resp.json()
-            raw_jobs = payload.get("jobs", []) if isinstance(payload, dict) else []
-            for raw in raw_jobs:
-                norm = self.normalize(raw)
-                if query and query.lower() not in f"{norm.job_title} {norm.description}".lower():
-                    continue
-                if location and location.lower() not in (norm.location or "").lower() and not norm.is_remote:
-                    continue
-                results.append(norm)
+            if resp.headers.get("etag"):
+                self._etag = resp.headers["etag"]
 
+            payload = resp.json()
+            page_jobs = payload.get("jobs", []) if isinstance(payload, dict) else []
+            raw_jobs.extend(page_jobs)
             meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
             total_pages = meta.get("total_pages")
-            if not raw_jobs:
-                break
-            if total_pages is not None:
-                if page >= int(total_pages):
-                    break
-            elif len(raw_jobs) < per_page:
+            if total_pages is None or page >= int(total_pages) or not page_jobs:
                 break
 
+        metrics.raw_fetched = len(raw_jobs)
+
+        # Scan fairly from cursor_offset (wraps or stops at end) without alphabetical truncation bias
+        total_raw = len(raw_jobs)
+        scanned_indices = range(cursor_offset, total_raw) if cursor_offset < total_raw else range(0, total_raw)
+        next_cursor_idx: int | None = None
+
+        for idx in scanned_indices:
+            raw = raw_jobs[idx]
+            title = str(raw.get("title") or "").strip()
+            loc_obj = raw.get("location") or {}
+            loc_str = loc_obj.get("name") if isinstance(loc_obj, dict) else str(loc_obj or "") or None
+
+            if smart_filter:
+                pre = evaluate_job_prefilter(
+                    title=title,
+                    location=loc_str,
+                    description="",
+                    query=query,
+                    requested_location=location,
+                    smart_filter=True,
+                )
+                if not pre.keep:
+                    if pre.reason in {"role_excluded", "role_non_target"}:
+                        metrics.removed_by_role += 1
+                    elif pre.reason == "location_outside_target":
+                        metrics.removed_by_location += 1
+                    elif pre.reason == "experience_senior":
+                        metrics.removed_by_experience += 1
+                    continue
+
+            norm = self.normalize(raw)
+            if smart_filter:
+                post = evaluate_job_prefilter(
+                    title=norm.job_title,
+                    location=norm.location,
+                    description=norm.description,
+                    is_remote_flag=norm.is_remote,
+                    experience_min=norm.experience_min,
+                    query=query,
+                    requested_location=location,
+                    smart_filter=True,
+                )
+                if not post.keep:
+                    if post.reason in {"role_excluded", "role_non_target"}:
+                        metrics.removed_by_role += 1
+                    elif post.reason == "location_outside_target":
+                        metrics.removed_by_location += 1
+                    elif post.reason == "experience_senior":
+                        metrics.removed_by_experience += 1
+                    continue
+            else:
+                if query and query.lower() not in f"{norm.job_title} {norm.description}".lower():
+                    metrics.removed_by_role += 1
+                    continue
+                if location and location.lower() not in (norm.location or "").lower() and not norm.is_remote:
+                    metrics.removed_by_location += 1
+                    continue
+
+            results.append(norm)
+            if len(results) >= max_results and idx + 1 < total_raw:
+                next_cursor_idx = idx + 1
+                break
+
+        metrics.shortlisted = len(results)
+        metrics.next_cursor = str(next_cursor_idx) if next_cursor_idx is not None else None
+        metrics.duration_ms = (time.monotonic() - t0) * 1000.0
+        self.last_scan_metrics = metrics
         return results
 
     async def fetch_job(self, external_job_id: str) -> NormalizedJob | None:

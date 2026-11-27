@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
+import time
 from typing import Any
 import httpx
 from app.connectors.base import ConnectorError, JobSourceConnector
 from app.schemas.workflow import NormalizedJob
+from app.services.discovery_prefilter import ConnectorScanMetrics, evaluate_job_prefilter
 from app.services.jd_sanitizer import extract_deterministic_job_signals, html_to_clean_text
 
 
@@ -33,6 +35,7 @@ class LeverConnector(JobSourceConnector):
         self.company_slug = company_slug
         self.company_name = company_name or company_slug
         self.base_url = base_url.rstrip("/")
+        self.last_scan_metrics = ConnectorScanMetrics()
 
     async def search(
         self,
@@ -40,19 +43,26 @@ class LeverConnector(JobSourceConnector):
         location: str | None = None,
         filters: dict[str, Any] | None = None,
     ) -> list[NormalizedJob]:
+        """Paginate Lever Postings API (limit/skip + optional commitment/team/department/level) and pre-filter locally."""
+        t0 = time.monotonic()
         filters = filters or {}
         limit = int(filters.get("limit", 100))
         max_pages = int(filters.get("max_pages", 5))
+        smart_filter = bool(filters.get("smart_filter", False))
+        max_results = int(filters.get("max_results", 50))
+        start_skip = int(filters.get("cursor", 0) or 0)
         results: list[NormalizedJob] = []
+        metrics = ConnectorScanMetrics()
 
         for page_idx in range(max_pages):
-            skip = page_idx * limit
+            skip = start_skip + page_idx * limit
             url = f"{self.base_url}/{self.company_slug}"
-            resp = await self._request(
-                "GET",
-                url,
-                params={"mode": "json", "limit": limit, "skip": skip},
-            )
+            params: dict[str, Any] = {"mode": "json", "limit": limit, "skip": skip}
+            for opt_key in ("location", "commitment", "team", "department", "level"):
+                if filters.get(opt_key):
+                    params[opt_key] = str(filters[opt_key])
+
+            resp = await self._request("GET", url, params=params)
             if resp.status_code == 404:
                 raise ConnectorError(f"Lever company board not found: {self.company_slug}")
             if resp.status_code >= 400:
@@ -62,17 +72,53 @@ class LeverConnector(JobSourceConnector):
             if not isinstance(raw_jobs, list) or not raw_jobs:
                 break
 
+            metrics.pages_scanned += 1
+            metrics.raw_fetched += len(raw_jobs)
+
             for raw in raw_jobs:
                 norm = self.normalize(raw)
-                if query and query.lower() not in f"{norm.job_title} {norm.description}".lower():
-                    continue
-                if location and location.lower() not in (norm.location or "").lower() and not norm.is_remote:
-                    continue
-                results.append(norm)
+                if smart_filter:
+                    decision = evaluate_job_prefilter(
+                        title=norm.job_title,
+                        location=norm.location,
+                        description=norm.description,
+                        is_remote_flag=norm.is_remote,
+                        experience_min=norm.experience_min,
+                        query=query,
+                        requested_location=location,
+                        smart_filter=True,
+                    )
+                    if not decision.keep:
+                        if decision.reason in {"role_excluded", "role_non_target"}:
+                            metrics.removed_by_role += 1
+                        elif decision.reason == "location_outside_target":
+                            metrics.removed_by_location += 1
+                        elif decision.reason == "experience_senior":
+                            metrics.removed_by_experience += 1
+                        continue
+                else:
+                    if query and query.lower() not in f"{norm.job_title} {norm.description}".lower():
+                        metrics.removed_by_role += 1
+                        continue
+                    if location and location.lower() not in (norm.location or "").lower() and not norm.is_remote:
+                        metrics.removed_by_location += 1
+                        continue
 
+                results.append(norm)
+                if len(results) >= max_results:
+                    break
+
+            if len(results) >= max_results:
+                metrics.next_cursor = str(skip + len(raw_jobs))
+                break
             if len(raw_jobs) < limit:
                 break
+            if page_idx + 1 == max_pages:
+                metrics.next_cursor = str(skip + len(raw_jobs))
 
+        metrics.shortlisted = len(results)
+        metrics.duration_ms = (time.monotonic() - t0) * 1000.0
+        self.last_scan_metrics = metrics
         return results
 
     async def fetch_job(self, external_job_id: str) -> NormalizedJob | None:

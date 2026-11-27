@@ -73,6 +73,16 @@ class Settings(BaseSettings):
     daily_application_target: int = Field(default=15, ge=1, le=50, alias="DAILY_APPLICATION_TARGET")
     max_applications_per_day: int = Field(default=15, ge=1, le=50, alias="MAX_APPLICATIONS_PER_DAY")
     min_job_match_score: int = Field(default=75, ge=0, le=100, alias="MIN_JOB_MATCH_SCORE")
+    discovery_max_analyzed_jobs_per_run: int = Field(
+        default=40,
+        ge=1,
+        le=250,
+        alias="DISCOVERY_MAX_ANALYZED_JOBS_PER_RUN",
+    )
+    discovery_smart_filter_enabled: bool = Field(
+        default=False,
+        alias="DISCOVERY_SMART_FILTER_ENABLED",
+    )
 
     auto_tailor_enabled: bool = Field(default=True, alias="AUTO_TAILOR_ENABLED")
     auto_tailor_daily_limit: int = Field(default=5, ge=0, le=50, alias="AUTO_TAILOR_DAILY_LIMIT")

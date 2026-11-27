@@ -1,3 +1,4 @@
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, TypedDict
@@ -45,6 +46,9 @@ class DiscoveryGraphState(TypedDict, total=False):
     reposted_count: int
     expired_count: int
     scored_matches: list[dict[str, Any]]
+    source_metrics: list[dict[str, Any]]
+    ai_metrics: dict[str, Any]
+    started_monotonic: float
     discovery_report: dict[str, Any]
     errors: list[dict[str, Any]]
 
@@ -88,8 +92,11 @@ def build_discovery_graph(
 
         fetched: list[dict[str, Any]] = []
         errors = list(state.get("errors") or [])
+        source_metrics: list[dict[str, Any]] = []
         queries = state.get("search_queries") or [""]
         max_pages = int(state.get("max_pages") or 3)
+        smart_filter = bool(getattr(settings, "discovery_smart_filter_enabled", True))
+        max_analyzed = int(getattr(settings, "discovery_max_analyzed_jobs_per_run", 40))
 
         for src in sources:
             src.last_run_at = datetime.now(timezone.utc)
@@ -99,14 +106,33 @@ def build_discovery_graph(
                     if connector_factory is not None
                     else build_connector(src, client=http_client)
                 )
+                src_cfg = dict(src.config or {})
+                per_board_cap = max(5, max_analyzed // max(1, len(sources)) + 5)
+                src_smart_filter = bool(src_cfg.get("smart_filter", smart_filter))
                 for q in queries:
                     items: list[NormalizedJob] = await connector.search(
                         query=q,
                         location=state.get("location"),
-                        filters={"max_pages": max_pages},
+                        filters={
+                            "max_pages": max_pages,
+                            "smart_filter": src_smart_filter,
+                            "max_results": per_board_cap,
+                            "cursor": src_cfg.get("continuation_cursor"),
+                        },
                     )
                     for item in items:
                         fetched.append({"source_id": str(src.id), "job": item.model_dump(mode="json")})
+
+                scan_m = getattr(connector, "last_scan_metrics", None)
+                if scan_m is not None:
+                    m_dict = scan_m.to_dict() if hasattr(scan_m, "to_dict") else dict(scan_m)
+                    m_dict["source_name"] = src.source_name
+                    source_metrics.append(m_dict)
+                    if m_dict.get("next_cursor") is not None:
+                        src_cfg["continuation_cursor"] = m_dict["next_cursor"]
+                    else:
+                        src_cfg.pop("continuation_cursor", None)
+                    src.config = src_cfg
 
                 health = connector.get_health()
                 src.health_status = health.status
@@ -126,7 +152,7 @@ def build_discovery_graph(
                 logger.warning("connector_error", extra={"extra_fields": err_entry})
 
         db.flush()
-        return {"fetched_records": fetched, "errors": errors}
+        return {"fetched_records": fetched, "errors": errors, "source_metrics": source_metrics}
 
     def normalize_and_deduplicate(state: DiscoveryGraphState) -> dict[str, Any]:
         fetched = state.get("fetched_records") or []
@@ -229,8 +255,13 @@ def build_discovery_graph(
         if profile is None:
             return {"scored_matches": []}
 
+        max_analyzed = int(getattr(settings, "discovery_max_analyzed_jobs_per_run", 40))
+        candidate_ids = (state.get("discovered_job_ids") or [])[:max_analyzed]
         scored: list[dict[str, Any]] = []
-        for jid_str in state.get("discovered_job_ids") or []:
+        est_tokens = 0
+        eligible_cnt = 0
+        ineligible_cnt = 0
+        for jid_str in candidate_ids:
             job = db.get(Job, uuid.UUID(jid_str))
             if job is None:
                 continue
@@ -243,9 +274,17 @@ def build_discovery_graph(
                 commitment=job.employment_type,
                 use_llm=True,
             )
+            if ext.llm_usage:
+                est_tokens += int(ext.llm_usage.get("input_tokens") or 0) + int(
+                    ext.llm_usage.get("output_tokens") or 0
+                )
             req = _persist_jd_extraction(db, job, ext)
             await sync_job_and_profile_embeddings(db, job=job, profile=profile, router=router)
             match = upsert_job_match(db, job=job, req=req, profile=profile)
+            if match.eligible:
+                eligible_cnt += 1
+            else:
+                ineligible_cnt += 1
             db.add(
                 JobAnalysisHistory(
                     job_id=job.id,
@@ -275,7 +314,15 @@ def build_discovery_graph(
             )
         scored.sort(key=lambda x: x["score"], reverse=True)
         db.flush()
-        return {"scored_matches": scored}
+        return {
+            "scored_matches": scored,
+            "ai_metrics": {
+                "jobs_submitted_for_ai": len(scored),
+                "eligible_count": eligible_cnt,
+                "ineligible_count": ineligible_cnt,
+                "estimated_llm_tokens": est_tokens,
+            },
+        }
 
     def build_discovery_report(state: DiscoveryGraphState) -> dict[str, Any]:
         scored = state.get("scored_matches") or []
@@ -291,6 +338,11 @@ def build_discovery_graph(
         sources_count = len({r["source_id"] for r in (state.get("fetched_records") or [])}) or len(
             state.get("errors") or []
         )
+        src_metrics = list(state.get("source_metrics") or [])
+        ai_m = dict(state.get("ai_metrics") or {})
+        started_m = float(state.get("started_monotonic") or time.monotonic())
+        elapsed_ms = round(max(0.0, (time.monotonic() - started_m) * 1000.0), 2)
+
         report = {
             "run_id": state["run_id"],
             "sources_queried": sources_count,
@@ -302,6 +354,21 @@ def build_discovery_graph(
             "quality_matches_count": len(recommended),
             "recommended_job_ids": recommended,
             "errors": list(state.get("errors") or []),
+            "metrics": {
+                "raw_jobs_fetched": sum(int(m.get("raw_fetched") or 0) for m in src_metrics),
+                "pages_scanned": sum(int(m.get("pages_scanned") or 0) for m in src_metrics),
+                "removed_by_role": sum(int(m.get("removed_by_role") or 0) for m in src_metrics),
+                "removed_by_location": sum(int(m.get("removed_by_location") or 0) for m in src_metrics),
+                "removed_by_experience": sum(int(m.get("removed_by_experience") or 0) for m in src_metrics),
+                "deduplicated_count": int(state.get("duplicate_count") or 0),
+                "jobs_submitted_for_ai": int(ai_m.get("jobs_submitted_for_ai") or 0),
+                "eligible_count": int(ai_m.get("eligible_count") or 0),
+                "ineligible_count": int(ai_m.get("ineligible_count") or 0),
+                "api_failures": len(state.get("errors") or []),
+                "processing_time_ms": elapsed_ms,
+                "estimated_llm_tokens": int(ai_m.get("estimated_llm_tokens") or 0),
+                "per_source": src_metrics,
+            },
         }
         record_audit_event(
             db,
@@ -391,6 +458,7 @@ async def run_discovery_workflow(
             "location": location,
             "max_pages": max_pages,
             "source_ids": [str(s) for s in source_ids] if source_ids else [],
+            "started_monotonic": time.monotonic(),
         }
         final_state = await compiled.ainvoke(
             initial_state,
