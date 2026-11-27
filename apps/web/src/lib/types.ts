@@ -596,3 +596,124 @@ export interface WorkflowRunResponse {
   started_at: string;
   updated_at: string;
 }
+
+export interface GmailConnectionSummary {
+  id: string;
+  provider: string;
+  mailbox_email: string;
+  status: "connected" | "revoked" | "expired" | "disconnected" | "error";
+  granted_scopes: string[];
+  last_synced_at: string | null;
+  last_sync_status: "idle" | "running" | "succeeded" | "failed" | null;
+  last_sync_error: string | null;
+  revoked_at: string | null;
+  disconnected_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GmailStatusResponse {
+  connected: boolean;
+  connections: GmailConnectionSummary[];
+}
+
+export interface GmailOAuthStartResponse {
+  authorization_url: string;
+  provider: "google_gmail";
+  scopes: string[];
+}
+
+export interface GmailSyncTriggerResponse {
+  status: string;
+  connections_queued: number;
+  message: string;
+}
+
+export interface SanitizedEmailConfirmationMetadata {
+  id: string;
+  sender_domain: string;
+  received_at: string;
+  match_status: "matched" | "confirmed" | "ambiguous" | "rejected" | "unmatched";
+  matched_application_id: string | null;
+  match_signals: Record<string, unknown>;
+  processed_at: string;
+}
+
+export interface FollowupResponse {
+  id: string;
+  application_id: string;
+  reminder_type: "initial_followup" | "second_followup" | "interview_thank_you" | "custom";
+  status: "pending" | "completed" | "snoozed" | "cancelled";
+  due_at: string;
+  snoozed_until: string | null;
+  completed_at: string | null;
+  interval_days: number;
+  draft_subject: string;
+  draft_body: string;
+  recruiter_context: Record<string, unknown>;
+  is_overdue: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InterviewKitResponse {
+  id: string;
+  application_id: string;
+  job_id: string;
+  resume_id: string;
+  resume_checksum: string;
+  version: number;
+  is_active: boolean;
+  modules_json: Record<string, Record<string, unknown>>;
+  progress_json: Record<string, unknown>;
+  user_feedback: string | null;
+  readiness_estimate: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InterviewAttemptResponse {
+  id: string;
+  session_id: string;
+  question_index: number;
+  module_key: string;
+  difficulty: string;
+  question_text: string;
+  expected_structure: string[];
+  hints: string[];
+  candidate_answer: string;
+  feedback_json: Record<string, unknown>;
+  score: number;
+  weak_topics: string[];
+  strong_topics: string[];
+  attempted_at: string;
+}
+
+export interface InterviewSessionResponse {
+  id: string;
+  kit_id: string;
+  round_type: string;
+  difficulty: "easy" | "medium" | "hard";
+  status: "active" | "completed";
+  current_question_index: number;
+  current_question_json: Record<string, unknown>;
+  report_json: Record<string, unknown>;
+  overall_score: number | null;
+  attempts: InterviewAttemptResponse[];
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface InterviewMemoryResponse {
+  id: string;
+  memory_type: string;
+  topic: string;
+  summary: string;
+  source: string;
+  confidence: number;
+  evidence_refs: string[];
+  attempt_count: number;
+  last_score: number | null;
+  created_at: string;
+  updated_at: string;
+}

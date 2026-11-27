@@ -2645,7 +2645,12 @@ class PlaywrightBrowserExecutor(ApplicationExecutionAdapter):
                     "_allowed_test_origins": [[h, p] for h, p in sorted(self._allowed_test_origins)],
                 },
             )
-            resp = _recv_ctrl(conn, buf)
+            try:
+                resp = _recv_ctrl(conn, buf)
+            except (EOFError, TimeoutError) as exc:
+                raise UnsupportedPlatformError(
+                    f"Supervised browser worker terminated before completing prefill ({type(exc).__name__})"
+                ) from exc
 
             if not resp.get("ok"):
                 err_type = resp.get("error_type")

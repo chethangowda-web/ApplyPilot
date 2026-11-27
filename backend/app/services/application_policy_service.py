@@ -248,19 +248,22 @@ class ConfirmationVerifier(Protocol):
 _CONFIRMATION_VERIFIER_REGISTRY: dict[str, ConfirmationVerifier] = {}
 
 
-def _select_server_verifier(application: Application) -> ConfirmationVerifier:
-    """Resolve a registered server-side verifier without trusting caller selection."""
+def _select_server_verifiers(application: Application) -> list[ConfirmationVerifier]:
+    """Resolve registered server-side verifiers without trusting caller selection."""
     if not _CONFIRMATION_VERIFIER_REGISTRY:
         raise ValueError(
             "No trusted confirmation verifier configured; CONFIRMED transition requires a verified server-side integration"
         )
+    matching: list[ConfirmationVerifier] = []
     for verifier in _CONFIRMATION_VERIFIER_REGISTRY.values():
         supported = getattr(verifier, "supported_modes", frozenset())
         if not supported or application.application_mode in supported:
-            return verifier
-    raise ValueError(
-        f"No registered confirmation verifier supports application_mode={application.application_mode}"
-    )
+            matching.append(verifier)
+    if not matching:
+        raise ValueError(
+            f"No registered confirmation verifier supports application_mode={application.application_mode}"
+        )
+    return matching
 
 
 def _validate_confirmation_proof(
@@ -269,39 +272,48 @@ def _validate_confirmation_proof(
     evidence: dict[str, Any] | None,
 ) -> VerifiedConfirmationProof:
     """Fail-closed validation via server-owned verifier registry and HMAC-sealed proof."""
-    verifier = _select_server_verifier(application)
-    registered_id = str(getattr(verifier, "verifier_id", "")).strip()
-    if not registered_id or _CONFIRMATION_VERIFIER_REGISTRY.get(registered_id) is not verifier:
-        raise ValueError(f"Unregistered or mismatched confirmation verifier: {registered_id!r}")
-
+    verifiers = _select_server_verifiers(application)
     if not isinstance(evidence, dict) or not evidence:
         raise ValueError("Confirmation evidence must be a non-empty dictionary")
 
-    issuer = ConfirmationProofIssuer(registered_id, _capability=_SERVER_PROOF_CAPABILITY)
-    proof = verifier.verify(application=application, evidence=evidence, issuer=issuer)
-    if not isinstance(proof, VerifiedConfirmationProof):
-        raise ValueError("ConfirmationVerifier must return a VerifiedConfirmationProof")
-    if proof.verifier_id != registered_id:
-        raise ValueError("Confirmation proof verifier_id does not match registered server verifier")
-    if proof.application_id != application.id:
-        raise ValueError("Confirmation proof application_id does not match target application")
-    if proof.verification_source not in TRUSTED_CONFIRMATION_SOURCES:
-        raise ValueError(f"Untrusted confirmation verification_source: {proof.verification_source}")
-    if not proof.external_ref_id.strip():
-        raise ValueError("Confirmation proof requires a non-empty external_ref_id")
-    if proof.confirmed_at.tzinfo is None:
-        raise ValueError("Confirmation proof requires a timezone-aware confirmed_at timestamp")
+    last_exc: ValueError | None = None
+    for verifier in verifiers:
+        registered_id = str(getattr(verifier, "verifier_id", "")).strip()
+        if not registered_id or _CONFIRMATION_VERIFIER_REGISTRY.get(registered_id) is not verifier:
+            raise ValueError(f"Unregistered or mismatched confirmation verifier: {registered_id!r}")
 
-    expected_mac = _compute_proof_mac(
-        application_id=proof.application_id,
-        verification_source=proof.verification_source,
-        external_ref_id=proof.external_ref_id,
-        confirmed_at=proof.confirmed_at,
-        verifier_id=proof.verifier_id,
-    )
-    if not hmac.compare_digest(proof._seal_mac, expected_mac):
-        raise ValueError("Confirmation proof seal verification failed")
-    return proof
+        issuer = ConfirmationProofIssuer(registered_id, _capability=_SERVER_PROOF_CAPABILITY)
+        try:
+            proof = verifier.verify(application=application, evidence=evidence, issuer=issuer)
+        except ValueError as exc:
+            last_exc = exc
+            continue
+        if not isinstance(proof, VerifiedConfirmationProof):
+            raise ValueError("ConfirmationVerifier must return a VerifiedConfirmationProof")
+        if proof.verifier_id != registered_id:
+            raise ValueError("Confirmation proof verifier_id does not match registered server verifier")
+        if proof.application_id != application.id:
+            raise ValueError("Confirmation proof application_id does not match target application")
+        if proof.verification_source not in TRUSTED_CONFIRMATION_SOURCES:
+            raise ValueError(f"Untrusted confirmation verification_source: {proof.verification_source}")
+        if not proof.external_ref_id.strip():
+            raise ValueError("Confirmation proof requires a non-empty external_ref_id")
+        if proof.confirmed_at.tzinfo is None:
+            raise ValueError("Confirmation proof requires a timezone-aware confirmed_at timestamp")
+
+        expected_mac = _compute_proof_mac(
+            application_id=proof.application_id,
+            verification_source=proof.verification_source,
+            external_ref_id=proof.external_ref_id,
+            confirmed_at=proof.confirmed_at,
+            verifier_id=proof.verifier_id,
+        )
+        if not hmac.compare_digest(proof._seal_mac, expected_mac):
+            raise ValueError("Confirmation proof seal verification failed")
+        return proof
+
+    assert last_exc is not None
+    raise last_exc
 
 
 class ApplicationPolicyRouter:

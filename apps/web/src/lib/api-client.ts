@@ -11,8 +11,15 @@ import type {
   DiscoveryRunResponse,
   ExecutionResult,
   FactualValidationReportResponse,
+  FollowupResponse,
+  GmailOAuthStartResponse,
+  GmailStatusResponse,
+  GmailSyncTriggerResponse,
   HandoffSessionInfo,
   HealthResponse,
+  InterviewKitResponse,
+  InterviewMemoryResponse,
+  InterviewSessionResponse,
   JobDetailResponse,
   JobEligibilityResponse,
   JobEvidenceResponse,
@@ -24,6 +31,7 @@ import type {
   ManualSubmitAuthorizationRequest,
   ManualSubmitAuthorizationResponse,
   ResumeMetadataResponse,
+  SanitizedEmailConfirmationMetadata,
   SessionStateResponse,
   TailorEnqueueResponse,
   TailoredResumeDetailResponse,
@@ -404,5 +412,84 @@ export const apiClient = {
 
   getWorkflowRun(threadId: string): Promise<WorkflowRunResponse> {
     return requestJson<WorkflowRunResponse>(`/api/backend/workflows/${encodeURIComponent(threadId)}`);
+  },
+
+  startGmailConnect(): Promise<GmailOAuthStartResponse> {
+    return requestJson<GmailOAuthStartResponse>("/api/backend/integrations/gmail/connect/start", {
+      method: "POST",
+    });
+  },
+
+  getGmailStatus(): Promise<GmailStatusResponse> {
+    return requestJson<GmailStatusResponse>("/api/backend/integrations/gmail/status");
+  },
+
+  disconnectGmail(connectionId?: string): Promise<{ connection_id: string; status: string }> {
+    return requestJson("/api/backend/integrations/gmail/disconnect", {
+      method: "POST",
+      body: JSON.stringify(connectionId ? { connection_id: connectionId } : {}),
+    });
+  },
+
+  syncGmailConfirmations(): Promise<GmailSyncTriggerResponse> {
+    return requestJson<GmailSyncTriggerResponse>("/api/backend/integrations/gmail/sync", {
+      method: "POST",
+    });
+  },
+
+  listGmailConfirmationEvents(applicationId?: string): Promise<SanitizedEmailConfirmationMetadata[]> {
+    const qs = applicationId ? `?application_id=${encodeURIComponent(applicationId)}` : "";
+    return requestJson<SanitizedEmailConfirmationMetadata[]>(`/api/backend/integrations/gmail/events${qs}`);
+  },
+
+  listFollowups(applicationId?: string): Promise<FollowupResponse[]> {
+    const qs = applicationId ? `?application_id=${encodeURIComponent(applicationId)}` : "";
+    return requestJson<FollowupResponse[]>(`/api/backend/followups${qs}`);
+  },
+
+  completeFollowup(followupId: string): Promise<FollowupResponse> {
+    return requestJson<FollowupResponse>(`/api/backend/followups/${followupId}/complete`, {
+      method: "POST",
+    });
+  },
+
+  listInterviewKits(applicationId?: string): Promise<InterviewKitResponse[]> {
+    const qs = applicationId ? `?application_id=${encodeURIComponent(applicationId)}` : "";
+    return requestJson<InterviewKitResponse[]>(`/api/backend/interviews/kits${qs}`);
+  },
+
+  generateInterviewKit(applicationId: string): Promise<InterviewKitResponse> {
+    return requestJson<InterviewKitResponse>("/api/backend/interviews/kits/generate", {
+      method: "POST",
+      body: JSON.stringify({ application_id: applicationId }),
+    });
+  },
+
+  startMockSession(
+    kitId: string,
+    roundType = "mixed",
+    difficulty = "medium",
+  ): Promise<InterviewSessionResponse> {
+    return requestJson<InterviewSessionResponse>("/api/backend/interviews/sessions/start", {
+      method: "POST",
+      body: JSON.stringify({ kit_id: kitId, round_type: roundType, difficulty }),
+    });
+  },
+
+  submitMockAnswer(sessionId: string, answer: string): Promise<InterviewSessionResponse> {
+    return requestJson<InterviewSessionResponse>(`/api/backend/interviews/sessions/${sessionId}/answer`, {
+      method: "POST",
+      body: JSON.stringify({ answer }),
+    });
+  },
+
+  listInterviewMemories(): Promise<InterviewMemoryResponse[]> {
+    return requestJson<InterviewMemoryResponse[]>("/api/backend/interviews/memory");
+  },
+
+  deleteInterviewMemory(memoryId: string): Promise<void> {
+    return requestJson<void>(`/api/backend/interviews/memory/${memoryId}`, {
+      method: "DELETE",
+    });
   },
 };

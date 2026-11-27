@@ -98,6 +98,54 @@ def _build_keyring(settings: Settings) -> tuple[str, dict[str, str]]:
     return active_ver, ring
 
 
+def _encrypt_with_aad(
+    plaintext: str,
+    *,
+    aad_builder: Any,
+    settings: Settings | None = None,
+) -> tuple[str, str]:
+    """Encrypt plaintext with AES-256-GCM using the active keyring version and caller-supplied AAD."""
+    if not plaintext:
+        raise ValueError("Plaintext secret cannot be empty")
+    cfg = settings or get_settings()
+    active_ver, ring = _build_keyring(cfg)
+    secret = ring.get(active_ver, "")
+    if not secret:
+        raise ValueError("ENCRYPTION_KEY must be configured to encrypt sensitive data")
+
+    key = _derive_aes256_key(secret, active_ver)
+    nonce = os.urandom(12)
+    aad = aad_builder(active_ver).encode("utf-8")
+    ct = AESGCM(key).encrypt(nonce, plaintext.encode("utf-8"), aad)
+    encoded = base64.urlsafe_b64encode(nonce + ct).decode("ascii")
+    return encoded, active_ver
+
+
+def _decrypt_with_aad(
+    ciphertext: str,
+    *,
+    key_version: str,
+    aad_builder: Any,
+    settings: Settings | None = None,
+) -> str:
+    """Decrypt and authenticate an AES-256-GCM payload using its recorded key version."""
+    cfg = settings or get_settings()
+    _, ring = _build_keyring(cfg)
+    ver = key_version.strip()
+    secret = ring.get(ver, "")
+    if not secret:
+        raise ValueError(f"Encryption key version '{key_version}' is not available in keyring")
+
+    raw = base64.urlsafe_b64decode(ciphertext.encode("ascii"))
+    if len(raw) < 29:
+        raise ValueError("Malformed ciphertext payload")
+    nonce, ct = raw[:12], raw[12:]
+    key = _derive_aes256_key(secret, ver)
+    aad = aad_builder(ver).encode("utf-8")
+    pt = AESGCM(key).decrypt(nonce, ct, aad)
+    return pt.decode("utf-8")
+
+
 def encrypt_sensitive_answer(
     plaintext: str,
     *,
@@ -108,18 +156,11 @@ def encrypt_sensitive_answer(
     """Authenticate and encrypt sensitive application answers with AES-256-GCM (no plaintext fallback)."""
     if not plaintext:
         raise ValueError("Sensitive answer plaintext cannot be empty")
-    cfg = settings or get_settings()
-    active_ver, ring = _build_keyring(cfg)
-    secret = ring.get(active_ver, "")
-    if not secret:
-        raise ValueError("ENCRYPTION_KEY must be configured to encrypt sensitive application answers")
-
-    key = _derive_aes256_key(secret, active_ver)
-    nonce = os.urandom(12)
-    aad = f"{application_id}:{question_key}:{active_ver}".encode("utf-8")
-    ct = AESGCM(key).encrypt(nonce, plaintext.encode("utf-8"), aad)
-    encoded = base64.urlsafe_b64encode(nonce + ct).decode("ascii")
-    return encoded, active_ver
+    return _encrypt_with_aad(
+        plaintext,
+        aad_builder=lambda ver: f"{application_id}:{question_key}:{ver}",
+        settings=settings,
+    )
 
 
 def decrypt_sensitive_answer(
@@ -131,20 +172,12 @@ def decrypt_sensitive_answer(
     settings: Settings | None = None,
 ) -> str:
     """Decrypt and authenticate a sensitive application answer using its recorded key version."""
-    cfg = settings or get_settings()
-    _, ring = _build_keyring(cfg)
-    secret = ring.get(key_version.strip(), "")
-    if not secret:
-        raise ValueError(f"Encryption key version '{key_version}' is not available in keyring")
-
-    raw = base64.urlsafe_b64decode(ciphertext.encode("ascii"))
-    if len(raw) < 29:
-        raise ValueError("Malformed ciphertext payload")
-    nonce, ct = raw[:12], raw[12:]
-    key = _derive_aes256_key(secret, key_version.strip())
-    aad = f"{application_id}:{question_key}:{key_version.strip()}".encode("utf-8")
-    pt = AESGCM(key).decrypt(nonce, ct, aad)
-    return pt.decode("utf-8")
+    return _decrypt_with_aad(
+        ciphertext,
+        key_version=key_version,
+        aad_builder=lambda ver: f"{application_id}:{question_key}:{ver}",
+        settings=settings,
+    )
 
 
 def rotate_sensitive_answer_ciphertext(
@@ -167,5 +200,77 @@ def rotate_sensitive_answer_ciphertext(
         plaintext,
         application_id=application_id,
         question_key=question_key,
+        settings=settings,
+    )
+
+
+def _oauth_aad(user_id: str, provider: str, token_kind: str, version: str) -> str:
+    uid = str(user_id).strip()
+    prov = provider.strip()
+    kind = token_kind.strip()
+    if not uid or not prov or not kind:
+        raise ValueError("OAuth AAD requires non-empty user_id, provider, and token_kind")
+    return f"oauth:{uid}:{prov}:{kind}:{version}"
+
+
+def encrypt_oauth_token(
+    plaintext: str,
+    *,
+    user_id: str,
+    provider: str,
+    token_kind: str = "refresh_token",
+    settings: Settings | None = None,
+) -> tuple[str, str]:
+    """Encrypt an OAuth credential at rest with AES-256-GCM and domain-separated OAuth AAD."""
+    if not plaintext:
+        raise ValueError("OAuth token plaintext cannot be empty")
+    return _encrypt_with_aad(
+        plaintext,
+        aad_builder=lambda ver: _oauth_aad(user_id, provider, token_kind, ver),
+        settings=settings,
+    )
+
+
+def decrypt_oauth_token(
+    ciphertext: str,
+    *,
+    key_version: str,
+    user_id: str,
+    provider: str,
+    token_kind: str = "refresh_token",
+    settings: Settings | None = None,
+) -> str:
+    """Decrypt and authenticate an OAuth credential using its recorded key version and OAuth AAD."""
+    return _decrypt_with_aad(
+        ciphertext,
+        key_version=key_version,
+        aad_builder=lambda ver: _oauth_aad(user_id, provider, token_kind, ver),
+        settings=settings,
+    )
+
+
+def rotate_oauth_token_ciphertext(
+    ciphertext: str,
+    *,
+    old_key_version: str,
+    user_id: str,
+    provider: str,
+    token_kind: str = "refresh_token",
+    settings: Settings | None = None,
+) -> tuple[str, str]:
+    """Re-encrypt an existing OAuth token under the active ENCRYPTION_KEY_VERSION."""
+    plaintext = decrypt_oauth_token(
+        ciphertext,
+        key_version=old_key_version,
+        user_id=user_id,
+        provider=provider,
+        token_kind=token_kind,
+        settings=settings,
+    )
+    return encrypt_oauth_token(
+        plaintext,
+        user_id=user_id,
+        provider=provider,
+        token_kind=token_kind,
         settings=settings,
     )

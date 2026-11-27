@@ -676,6 +676,259 @@ class ApprovalRecord(Base):
     application: Mapped["Application"] = relationship(back_populates="approval_records")
 
 
+class OAuthConnection(Base):
+    __tablename__ = "oauth_connections"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "provider",
+            "mailbox_email",
+            name="uq_oauth_connections_user_provider_mailbox",
+        ),
+        CheckConstraint(
+            "status IN ('connected', 'revoked', 'expired', 'disconnected', 'error')",
+            name="ck_oauth_connections_status",
+        ),
+        CheckConstraint(
+            "last_sync_status IS NULL OR last_sync_status IN ('idle', 'running', 'succeeded', 'failed')",
+            name="ck_oauth_connections_sync_status",
+        ),
+        CheckConstraint(
+            "status != 'connected' OR ("
+            "encrypted_refresh_token IS NOT NULL AND length(encrypted_refresh_token) > 0 "
+            "AND encryption_key_version IS NOT NULL"
+            ")",
+            name="ck_oauth_connections_connected_token_required",
+        ),
+        Index("ix_oauth_connections_user_provider_status", "user_id", "provider", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(64), default="google_gmail", nullable=False)
+    mailbox_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="connected", nullable=False)
+    encrypted_refresh_token: Mapped[str] = mapped_column(Text, nullable=True)
+    encryption_key_version: Mapped[str] = mapped_column(String(32), nullable=True)
+    granted_scopes: Mapped[list] = mapped_column(JSONVariant, default=list, nullable=False)
+    last_history_id: Mapped[str] = mapped_column(String(128), nullable=True)
+    last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sync_status: Mapped[str] = mapped_column(String(32), nullable=True)
+    last_sync_error: Mapped[str] = mapped_column(Text, nullable=True)
+    revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    disconnected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    confirmation_events: Mapped[list["EmailConfirmationEvent"]] = relationship(
+        back_populates="oauth_connection", cascade="all, delete-orphan"
+    )
+
+
+class EmailConfirmationEvent(Base):
+    __tablename__ = "email_confirmation_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "oauth_connection_id",
+            "gmail_message_id",
+            name="uq_email_conf_events_conn_msg",
+        ),
+        CheckConstraint(
+            "match_status IN ('matched', 'confirmed', 'ambiguous', 'rejected', 'unmatched')",
+            name="ck_email_conf_events_match_status",
+        ),
+        Index("ix_email_conf_events_user_status", "user_id", "match_status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    oauth_connection_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("oauth_connections.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    gmail_message_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    gmail_thread_id: Mapped[str] = mapped_column(String(128), nullable=True)
+    sender_domain: Mapped[str] = mapped_column(String(255), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    match_status: Mapped[str] = mapped_column(String(32), default="unmatched", nullable=False)
+    matched_application_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("applications.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    match_signals: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    oauth_connection: Mapped["OAuthConnection"] = relationship(back_populates="confirmation_events")
+
+
+class ApplicationFollowup(Base):
+    __tablename__ = "application_followups"
+    __table_args__ = (
+        CheckConstraint(
+            "reminder_type IN ('initial_followup', 'second_followup', 'interview_thank_you', 'custom')",
+            name="ck_app_followups_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'completed', 'snoozed', 'cancelled')",
+            name="ck_app_followups_status",
+        ),
+        Index("ix_app_followups_user_status_due", "user_id", "status", "due_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    reminder_type: Mapped[str] = mapped_column(String(32), default="initial_followup", nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="pending", nullable=False)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    snoozed_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    interval_days: Mapped[int] = mapped_column(Integer, default=7, nullable=False)
+    draft_subject: Mapped[str] = mapped_column(String(300), nullable=False)
+    draft_body: Mapped[str] = mapped_column(Text, nullable=False)
+    recruiter_context: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class InterviewKit(Base):
+    __tablename__ = "interview_kits"
+    __table_args__ = (
+        Index("ix_interview_kits_user_app_active", "user_id", "application_id", "is_active"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("jobs.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    resume_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("resumes.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    resume_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    modules_json: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    progress_json: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    user_feedback: Mapped[str] = mapped_column(Text, nullable=True)
+    readiness_estimate: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class InterviewSession(Base):
+    __tablename__ = "interview_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "round_type IN ('technical', 'dsa', 'backend_swe', 'ai_ml', 'resume_deep_dive', 'behavioral', 'mixed')",
+            name="ck_interview_sessions_round",
+        ),
+        CheckConstraint(
+            "difficulty IN ('easy', 'medium', 'hard')",
+            name="ck_interview_sessions_difficulty",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'completed')",
+            name="ck_interview_sessions_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    kit_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("interview_kits.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    round_type: Mapped[str] = mapped_column(String(32), default="mixed", nullable=False)
+    difficulty: Mapped[str] = mapped_column(String(16), default="medium", nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="active", nullable=False)
+    current_question_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    current_question_json: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    report_json: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    overall_score: Mapped[float] = mapped_column(Float, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class InterviewAttempt(Base):
+    __tablename__ = "interview_attempts"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("interview_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    kit_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("interview_kits.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    question_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    module_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    difficulty: Mapped[str] = mapped_column(String(24), nullable=False)
+    question_text: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_structure: Mapped[list] = mapped_column(JSONVariant, default=list, nullable=False)
+    hints: Mapped[list] = mapped_column(JSONVariant, default=list, nullable=False)
+    candidate_answer: Mapped[str] = mapped_column(Text, nullable=False)
+    feedback_json: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    weak_topics: Mapped[list] = mapped_column(JSONVariant, default=list, nullable=False)
+    strong_topics: Mapped[list] = mapped_column(JSONVariant, default=list, nullable=False)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class InterviewMemory(Base):
+    __tablename__ = "interview_memories"
+    __table_args__ = (
+        CheckConstraint(
+            "memory_type IN ('weak_topic', 'recurring_mistake', 'strong_area', 'behavioral_example', 'asked_question', 'feedback_note')",
+            name="ck_interview_memories_type",
+        ),
+        Index("ix_interview_memories_user_type", "user_id", "memory_type"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    memory_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    topic: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(String(120), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, default=0.7, nullable=False)
+    evidence_refs: Mapped[list] = mapped_column(JSONVariant, default=list, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    last_score: Mapped[float] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
 def _reject_append_only_mutation(_mapper, _connection, target) -> None:
     raise ValueError(f"{type(target).__name__} is append-only and immutable")
 

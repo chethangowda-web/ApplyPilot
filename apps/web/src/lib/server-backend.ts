@@ -12,6 +12,9 @@ const ALLOWED_BACKEND_PREFIXES = new Set([
   "jobs",
   "applications",
   "workflows",
+  "integrations",
+  "followups",
+  "interviews",
 ]);
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
