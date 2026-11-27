@@ -2,6 +2,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from app.api.routes.applications import router as applications_router
 from app.api.routes.auth import router as auth_router
+from app.api.routes.career import router as career_router
+from app.api.routes.integrations import router as integrations_router
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.profile import router as profile_router
 from app.api.routes.resume import router as resume_router
@@ -11,6 +13,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.database.session import get_session_factory
 from app.graphs.checkpointer import ensure_postgres_checkpointer_setup
+from app.services.gmail_confirmation_verifier import register_gmail_confirmation_verifier
 from app.services.outbox_service import recover_outbox_jobs
 
 settings = get_settings()
@@ -19,6 +22,7 @@ logger = get_logger("applypilot.main")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    register_gmail_confirmation_verifier()
     db_url = get_settings().database_url
     if db_url.startswith("postgresql"):
         try:
@@ -36,7 +40,13 @@ async def lifespan(_app: FastAPI):
                 "startup_outbox_recovery_skipped",
                 extra={"extra_fields": {"error_type": type(exc).__name__}},
             )
-    yield
+    try:
+        yield
+    finally:
+        from app.services import application_policy_service as policy_service
+        from app.services.gmail_confirmation_verifier import GmailConfirmationVerifier
+
+        policy_service._CONFIRMATION_VERIFIER_REGISTRY.pop(GmailConfirmationVerifier.verifier_id, None)
 
 
 app = FastAPI(
@@ -53,6 +63,8 @@ app.include_router(resumes_intelligence_router)
 app.include_router(jobs_router)
 app.include_router(workflows_router)
 app.include_router(applications_router)
+app.include_router(integrations_router)
+app.include_router(career_router)
 
 
 @app.get("/health", tags=["system"])

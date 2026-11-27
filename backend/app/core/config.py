@@ -31,6 +31,32 @@ class Settings(BaseSettings):
 
     google_client_id: str = Field(default="", alias="GOOGLE_CLIENT_ID")
     google_client_secret: str = Field(default="", alias="GOOGLE_CLIENT_SECRET")
+    google_oauth_redirect_uri: str = Field(
+        default="http://localhost:3000/api/integrations/gmail/callback",
+        alias="GOOGLE_OAUTH_REDIRECT_URI",
+    )
+    gmail_confirmation_window_days: int = Field(
+        default=14,
+        ge=1,
+        le=90,
+        alias="GMAIL_CONFIRMATION_WINDOW_DAYS",
+    )
+    gmail_sync_interval_minutes: int = Field(
+        default=15,
+        ge=1,
+        le=1440,
+        alias="GMAIL_SYNC_INTERVAL_MINUTES",
+    )
+    gmail_sync_max_messages: int = Field(
+        default=50,
+        ge=1,
+        le=250,
+        alias="GMAIL_SYNC_MAX_MESSAGES",
+    )
+    gmail_sync_beat_enabled: bool = Field(
+        default=False,
+        alias="GMAIL_SYNC_BEAT_ENABLED",
+    )
 
     secret_key: str = Field(
         default="dev-only-secret-key-change-me-minimum-32-bytes",

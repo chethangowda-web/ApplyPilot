@@ -10,7 +10,7 @@ def create_celery_app(redis_url: str | None = None) -> Celery:
         "applypilot_workers",
         broker=broker,
         backend=broker,
-        include=["app.workers.resume_tasks"],
+        include=["app.workers.resume_tasks", "app.workers.gmail_tasks"],
     )
     app.conf.update(
         task_serializer="json",
@@ -38,6 +38,13 @@ def create_celery_app(redis_url: str | None = None) -> Celery:
         task_soft_time_limit=180,
         task_time_limit=240,
     )
+    if cfg.gmail_sync_beat_enabled:
+        app.conf.beat_schedule = {
+            "gmail-confirmation-sync": {
+                "task": "applypilot.gmail.sync_all_enabled",
+                "schedule": float(cfg.gmail_sync_interval_minutes * 60),
+            }
+        }
     return app
 
 

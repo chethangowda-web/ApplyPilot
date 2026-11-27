@@ -76,10 +76,20 @@ export function Stage11VerificationPanel({
         </p>
 
         {app.external_ref_id && (
-          <p className="flex items-center gap-1.5 font-mono text-[var(--state-completed-fg)]">
-            <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Verified External Receipt ID: {app.external_ref_id}</span>
-          </p>
+          <div className="space-y-1 text-[var(--state-completed-fg)]">
+            <p className="flex items-center gap-1.5 font-mono">
+              <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Verified External Receipt ID: {app.external_ref_id}</span>
+            </p>
+            {typeof app.confirmation_evidence?.sender_domain === "string" && (
+              <p className="text-[11px] text-[var(--ink-secondary)]">
+                Verified via <code className="font-mono">{String(app.confirmation_evidence.sender_domain)}</code>
+                {typeof app.confirmation_evidence?.received_at === "string"
+                  ? ` · Received ${new Date(String(app.confirmation_evidence.received_at)).toLocaleString()}`
+                  : ""}
+              </p>
+            )}
+          </div>
         )}
       </div>
 
