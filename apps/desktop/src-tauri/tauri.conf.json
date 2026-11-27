@@ -7,7 +7,7 @@
     "beforeDevCommand": "npm --prefix ../web run dev",
     "devUrl": "http://localhost:3000",
     "beforeBuildCommand": "npm --prefix ../web run build",
-    "frontendDist": "../web/.next"
+    "frontendDist": "../../web/.next"
   },
   "app": {
     "windows": [
@@ -26,6 +26,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "nsis"]
+    "targets": ["msi", "nsis"],
+    "icon": ["icons/icon.ico", "icons/icon.png"]
   }
 }
