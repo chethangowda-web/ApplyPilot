@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",
+    "tauri": "tauri",
     "launch:web": "node launcher.mjs",
     "test": "node --test desktop.test.mjs"
   },
