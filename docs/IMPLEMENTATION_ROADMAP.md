@@ -179,4 +179,22 @@ Before enabling live submissions, build a **50–100 representative JD evaluatio
 - **Remaining Limitations:** Production `_CONFIRMATION_VERIFIER_REGISTRY` remains empty until **Milestone 6** (Gmail OAuth / ATS webhook trusted confirmation integrations); `BrowserHandoffManager` holds live Chromium worker handles in memory per backend process.
 - **Milestone 7 Acceptance Criteria:** **Milestone 7 is officially CLOSED / ACCEPTED.**
 
+---
+
+## 10. Milestone 6, Milestone 8 & Desktop Verification Status (2026-11-27)
+
+### Implemented Scope
+- **Milestone 6 — Career Intelligence (`0006_milestone_6` & `0007_milestone_6_career`):**
+  - **Gmail OAuth2 & Independent Confirmation:** PKCE S256 + single-use Redis `state` (`600s` TTL) + Next.js BFF `/api/integrations/gmail/callback` (`HttpOnly` cookie session binding), AES-256-GCM OAuth refresh-token encryption (`oauth:{user_id}:{provider}:{token_kind}:{version}` AAD), `gmail.readonly` incremental `historyId` sync + bounded `newer_than:14d` fallback, deterministic-first `email_confirmation_matcher.py`, and server-owned `GmailConfirmationVerifier` registered in `_CONFIRMATION_VERIFIER_REGISTRY` (FastAPI lifespan & Celery workers), plus `/settings` and Step 11 confirmation UI.
+  - **Follow-ups, 8-Module Interview Kit, Adaptive Mock Interview & Interview Memory:** `ApplicationFollowup` (editable drafts, snooze/complete, never auto-sends), `InterviewKit` (8 modules grounded in approved resume SHA-256 & verified evidence, progress/export), `InterviewSession`/`InterviewAttempt` (adaptive difficulty & transparent rubric), `InterviewMemory` (user-controlled CRUD), and `/interviews` UI.
+- **Milestone 8 — Production Hardening & Observability:**
+  - `CircuitBreaker` & `DeadLetterBuffer` (`app/core/resilience.py`), `ObservabilityRegistry` & per-workflow cost budgets (`app/services/observability_service.py`), `/health/ready` & `/api/ops/observability` (`app/api/routes/ops.py`), operational recovery runbook (`docs/OPERATIONAL_RECOVERY.md`), and email confirmation precision/recall evaluation (`test_milestone8_hardening_and_eval.py`).
+- **Desktop Shell (`apps/desktop`):**
+  - Tauri v2 shell (`src-tauri/tauri.conf.json`, `Cargo.toml`, `src/main.rs`) reusing `apps/web` with CSP, notification plugin, and `/health/ready` check (no local secret/token storage).
+
+### Known Limitations
+- Live Google Cloud OAuth2 consent flow requires configuring `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env` (validated in CI with `httpx.MockTransport`).
+- Rust/Cargo is not installed on the local Windows host, so `cargo tauri build` native binary compilation is pending Rust toolchain installation.
+
+
 

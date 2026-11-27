@@ -826,6 +826,19 @@ def _run_worker(ctrl_port: int) -> int:
                     browser.close()
                 except Exception:
                     pass
+        except Exception as exc:
+            try:
+                _send_frame(
+                    sock,
+                    {
+                        "ok": False,
+                        "error_type": type(exc).__name__,
+                        "error": f"Worker startup failure: {type(exc).__name__}",
+                    },
+                )
+            except Exception:
+                pass
+            return 1
         finally:
             proxy.stop()
     finally:

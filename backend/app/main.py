@@ -5,6 +5,7 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.career import router as career_router
 from app.api.routes.integrations import router as integrations_router
 from app.api.routes.jobs import router as jobs_router
+from app.api.routes.ops import router as ops_router
 from app.api.routes.profile import router as profile_router
 from app.api.routes.resume import router as resume_router
 from app.api.routes.resumes_intelligence import router as resumes_intelligence_router
@@ -65,6 +66,7 @@ app.include_router(workflows_router)
 app.include_router(applications_router)
 app.include_router(integrations_router)
 app.include_router(career_router)
+app.include_router(ops_router)
 
 
 @app.get("/health", tags=["system"])
