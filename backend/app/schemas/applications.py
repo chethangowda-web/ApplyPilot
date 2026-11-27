@@ -278,6 +278,19 @@ class ExecutionOptions(BaseModel):
     timeout_seconds: int | None = Field(default=None, ge=10, le=600)
 
 
+class PendingSubmissionFieldPreview(BaseModel):
+    """Parsed field preview derived strictly from the intercepted held wire request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field_name: str = Field(..., min_length=1, max_length=256)
+    field_kind: Literal["text", "file", "csrf_token"]
+    is_sensitive: bool = False
+    value_preview: str | None = None
+    file_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    value_count: int = Field(default=1, ge=1)
+
+
 class PendingSubmissionInfo(BaseModel):
     """Exact intercepted navigation submission held awaiting explicit user confirmation."""
 
@@ -289,6 +302,7 @@ class PendingSubmissionInfo(BaseModel):
     payload_sha256: str = Field(..., min_length=64, max_length=64)
     detected_at: datetime
     expires_at: datetime
+    captured_fields: list[PendingSubmissionFieldPreview] = Field(default_factory=list)
 
 
 class ManualSubmitAuthorizationRequest(BaseModel):

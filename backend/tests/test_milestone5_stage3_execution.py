@@ -2092,3 +2092,73 @@ def test_stage3_audit_zero_pii_in_logs_results_errors_and_masked_artifacts(tmp_p
     finally:
         fixture.shutdown()
         fixture.server_close()
+
+
+def test_pending_submission_captured_fields_preview_masks_sensitive_and_binds_wire_payload() -> None:
+    from urllib.parse import urlencode
+    from app.services.browser_executor import SubmitGuardState
+
+    guard = SubmitGuardState(expected_destination_url="https://boards.greenhouse.io/acme/jobs/101")
+    guard.mark_prefill_complete(
+        final_url="https://boards.greenhouse.io/acme/jobs/101",
+        detected_form_action="https://boards.greenhouse.io/acme/jobs/101",
+        detected_http_method="POST",
+    )
+    sensitive_vals = {
+        "field_nino": "AB123456C",
+        "field_dob": "1999-04-12",
+        "field_passport": "P99887766",
+        "field_visa": "Requires H1B sponsorship",
+        "field_phone": "+91-9876543210",
+        "field_email": "aarav@example.com",
+        "field_addr": "42 MG Road, Bengaluru",
+        "field_comp": "2800000 INR",
+        "opaque_custom": "ambiguous-secret-val",
+    }
+    expected = {"full_name": ["Aarav Mehta"], **{k: [v] for k, v in sensitive_vals.items()}}
+    guard.set_expected_payload_policy(
+        expected_fields=expected,
+        expected_file_fields={"resume": "a" * 64},
+        allowed_csrf_tokens={"csrf_token": "csrf-secret-xyz"},
+        field_metadata={
+            "full_name": {"label": "Full Name", "question_key": "full_name", "field_type": "text", "input_type": "text", "autocomplete": "name", "is_sensitive": False},
+            "field_nino": {"label": "National Insurance Number", "question_key": "q_1", "field_type": "text", "input_type": "text", "autocomplete": "", "is_sensitive": False},
+            "field_dob": {"label": "Birth Info", "question_key": "q_2", "field_type": "text", "input_type": "date", "autocomplete": "bday", "is_sensitive": False},
+            "field_passport": {"label": "Passport Number", "question_key": "q_3", "field_type": "text", "input_type": "password", "autocomplete": "", "is_sensitive": False},
+            "field_visa": {"label": "Work Authorization & Visa Sponsorship", "question_key": "q_4", "field_type": "text", "input_type": "text", "autocomplete": "", "is_sensitive": False},
+            "field_phone": {"label": "Contact Number", "question_key": "q_5", "field_type": "phone", "input_type": "tel", "autocomplete": "tel", "is_sensitive": False},
+            "field_email": {"label": "Contact", "question_key": "q_6", "field_type": "email", "input_type": "email", "autocomplete": "email", "is_sensitive": False},
+            "field_addr": {"label": "Home", "question_key": "q_7", "field_type": "text", "input_type": "text", "autocomplete": "street-address", "is_sensitive": False},
+            "field_comp": {"label": "Expected Salary & Compensation", "question_key": "q_8", "field_type": "text", "input_type": "text", "autocomplete": "", "is_sensitive": False},
+            # opaque_custom intentionally omitted from field_metadata -> must fail closed!
+        },
+    )
+
+    body = urlencode({**{k: v for k, v in sensitive_vals.items()}, "full_name": "Aarav Mehta", "csrf_token": "csrf-secret-xyz"}).encode("utf-8")
+    # Also verify _build_captured_field_previews directly with file_checksums + metadata
+    from app.services.browser_executor import _build_captured_field_previews, parse_submitted_request_payload
+
+    text_fields, _files, wire_bytes = parse_submitted_request_payload(
+        url="https://boards.greenhouse.io/acme/jobs/101",
+        method="POST",
+        headers={"content-type": "application/x-www-form-urlencoded"},
+        post_data_buffer=body,
+    )
+    previews = _build_captured_field_previews(
+        text_fields=text_fields,
+        file_checksums={"resume": "a" * 64},
+        field_metadata=guard._field_metadata,
+    )
+    by_name = {p.field_name: p for p in previews}
+    assert by_name["full_name"].is_sensitive is False
+    assert by_name["full_name"].value_preview == "Aarav Mehta"
+    for k, raw_val in sensitive_vals.items():
+        assert by_name[k].is_sensitive is True, f"{k} must be masked"
+        assert raw_val not in (by_name[k].value_preview or ""), f"{k} leaked raw value!"
+    assert by_name["csrf_token"].field_kind == "csrf_token"
+    assert by_name["csrf_token"].is_sensitive is True
+    assert "csrf-secret-xyz" not in (by_name["csrf_token"].value_preview or "")
+    assert by_name["resume"].field_kind == "file"
+    assert by_name["resume"].file_sha256 == "a" * 64
+    assert by_name["resume"].value_preview is None
+    assert len(wire_bytes) > 0

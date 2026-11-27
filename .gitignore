@@ -32,6 +32,8 @@ node_modules/
 .next/
 out/
 target/
+coverage/
+*.tsbuildinfo
 
 # Local private candidate artifacts
 storage/master_resume/*
