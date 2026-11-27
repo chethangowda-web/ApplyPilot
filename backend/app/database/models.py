@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    event,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -541,3 +542,145 @@ class ResumeJobMapping(Base):
         back_populates="job_mappings",
         foreign_keys=[resume_id],
     )
+
+
+class Application(Base):
+    __tablename__ = "applications"
+    __table_args__ = (
+        CheckConstraint(
+            "application_mode IN ('official_api', 'human_approved_browser', 'manual')",
+            name="ck_applications_mode",
+        ),
+        CheckConstraint(
+            "status IN ("
+            "'ELIGIBLE', 'MATCHED', 'RESUME_READY', 'NEEDS_USER_INPUT', 'AWAITING_APPROVAL', "
+            "'APPROVED', 'SUBMISSION_PENDING', 'SUBMITTED', 'USER_REPORTED_SUBMITTED', "
+            "'UNVERIFIED', 'CONFIRMED', 'INTERVIEW', 'REJECTED', 'WITHDRAWN', 'EXPIRED', "
+            "'FAILED', 'DUPLICATE', 'MANUAL_ACTION_REQUIRED'"
+            ")",
+            name="ck_applications_status",
+        ),
+        Index(
+            "uq_applications_active_user_canonical_job",
+            "user_id",
+            "canonical_job_key",
+            unique=True,
+            postgresql_where=text(
+                "user_id IS NOT NULL AND deleted_at IS NULL AND status NOT IN ('FAILED', 'EXPIRED', 'REJECTED')"
+            ),
+            sqlite_where=text(
+                "user_id IS NOT NULL AND deleted_at IS NULL AND status NOT IN ('FAILED', 'EXPIRED', 'REJECTED')"
+            ),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("jobs.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    resume_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("resumes.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    canonical_job_key: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    application_mode: Mapped[str] = mapped_column(String(32), default="human_approved_browser", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="RESUME_READY", index=True, nullable=False)
+    destination_url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
+    external_ref_id: Mapped[str] = mapped_column(String(255), nullable=True)
+    confirmation_evidence: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_followup_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    anonymized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_message: Mapped[str] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    answers: Mapped[list["ApplicationAnswer"]] = relationship(
+        back_populates="application", cascade="all, delete-orphan"
+    )
+    approval_records: Mapped[list["ApprovalRecord"]] = relationship(
+        back_populates="application", order_by="ApprovalRecord.decided_at.desc()"
+    )
+
+
+class ApplicationAnswer(Base):
+    __tablename__ = "application_answers"
+    __table_args__ = (
+        CheckConstraint(
+            "(NOT is_sensitive) OR ("
+            "answer_encrypted IS NOT NULL AND length(answer_encrypted) > 0 "
+            "AND answer_plaintext IS NULL AND key_version IS NOT NULL"
+            ")",
+            name="ck_app_answers_sensitive_encrypted",
+        ),
+        CheckConstraint(
+            "is_sensitive OR (answer_plaintext IS NOT NULL AND answer_encrypted IS NULL)",
+            name="ck_app_answers_nonsensitive_plain",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    question_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    is_sensitive: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    answer_encrypted: Mapped[str] = mapped_column(Text, nullable=True)
+    answer_plaintext: Mapped[str] = mapped_column(Text, nullable=True)
+    key_version: Mapped[str] = mapped_column(String(32), nullable=True)
+    evidence_source: Mapped[str] = mapped_column(String(160), nullable=True)
+    user_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    application: Mapped["Application"] = relationship(back_populates="answers")
+
+
+class ApprovalRecord(Base):
+    __tablename__ = "approval_records"
+    __table_args__ = (
+        CheckConstraint("decision IN ('approved', 'rejected')", name="ck_approval_records_decision"),
+        CheckConstraint(
+            "application_mode IN ('official_api', 'human_approved_browser', 'manual')",
+            name="ck_approval_records_mode",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("applications.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    decision: Mapped[str] = mapped_column(String(24), nullable=False)
+    actor: Mapped[str] = mapped_column(String(120), nullable=False)
+    resume_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    resume_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    destination_url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    application_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    answers_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    approval_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    notes: Mapped[str] = mapped_column(Text, nullable=True)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    application: Mapped["Application"] = relationship(back_populates="approval_records")
+
+
+def _reject_append_only_mutation(_mapper, _connection, target) -> None:
+    raise ValueError(f"{type(target).__name__} is append-only and immutable")
+
+
+event.listen(ApprovalRecord, "before_update", _reject_append_only_mutation)
+event.listen(ApprovalRecord, "before_delete", _reject_append_only_mutation)
+event.listen(AuditLog, "before_update", _reject_append_only_mutation)
+event.listen(AuditLog, "before_delete", _reject_append_only_mutation)

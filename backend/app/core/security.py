@@ -1,9 +1,14 @@
+import base64
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
+import os
 from typing import Any
 import bcrypt
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import jwt
 from fastapi import HTTPException, status
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 
 ALGORITHM = "HS256"
 
@@ -63,3 +68,104 @@ def decode_access_token(token: str) -> dict[str, Any]:
             detail="Invalid token payload",
         )
     return payload
+
+
+def _derive_aes256_key(secret: str, version: str) -> bytes:
+    """Derive a domain-separated 256-bit key for AES-256-GCM from secret material and version."""
+    return hashlib.sha256(f"applypilot-aes256-gcm:{version}:{secret}".encode("utf-8")).digest()
+
+
+def _build_keyring(settings: Settings) -> tuple[str, dict[str, str]]:
+    active_ver = (settings.encryption_key_version or "v1").strip()
+    active_key = (settings.encryption_key or "").strip()
+    ring: dict[str, str] = {}
+    raw_prev = (settings.encryption_previous_keys or "").strip()
+    if raw_prev:
+        if raw_prev.startswith("{"):
+            parsed = json.loads(raw_prev)
+            if isinstance(parsed, dict):
+                for k, v in parsed.items():
+                    if str(k).strip() and str(v).strip():
+                        ring[str(k).strip()] = str(v).strip()
+        else:
+            for item in raw_prev.split(","):
+                if ":" in item:
+                    k, v = item.split(":", 1)
+                    if k.strip() and v.strip():
+                        ring[k.strip()] = v.strip()
+    if active_key:
+        ring[active_ver] = active_key
+    return active_ver, ring
+
+
+def encrypt_sensitive_answer(
+    plaintext: str,
+    *,
+    application_id: str,
+    question_key: str,
+    settings: Settings | None = None,
+) -> tuple[str, str]:
+    """Authenticate and encrypt sensitive application answers with AES-256-GCM (no plaintext fallback)."""
+    if not plaintext:
+        raise ValueError("Sensitive answer plaintext cannot be empty")
+    cfg = settings or get_settings()
+    active_ver, ring = _build_keyring(cfg)
+    secret = ring.get(active_ver, "")
+    if not secret:
+        raise ValueError("ENCRYPTION_KEY must be configured to encrypt sensitive application answers")
+
+    key = _derive_aes256_key(secret, active_ver)
+    nonce = os.urandom(12)
+    aad = f"{application_id}:{question_key}:{active_ver}".encode("utf-8")
+    ct = AESGCM(key).encrypt(nonce, plaintext.encode("utf-8"), aad)
+    encoded = base64.urlsafe_b64encode(nonce + ct).decode("ascii")
+    return encoded, active_ver
+
+
+def decrypt_sensitive_answer(
+    ciphertext: str,
+    *,
+    key_version: str,
+    application_id: str,
+    question_key: str,
+    settings: Settings | None = None,
+) -> str:
+    """Decrypt and authenticate a sensitive application answer using its recorded key version."""
+    cfg = settings or get_settings()
+    _, ring = _build_keyring(cfg)
+    secret = ring.get(key_version.strip(), "")
+    if not secret:
+        raise ValueError(f"Encryption key version '{key_version}' is not available in keyring")
+
+    raw = base64.urlsafe_b64decode(ciphertext.encode("ascii"))
+    if len(raw) < 29:
+        raise ValueError("Malformed ciphertext payload")
+    nonce, ct = raw[:12], raw[12:]
+    key = _derive_aes256_key(secret, key_version.strip())
+    aad = f"{application_id}:{question_key}:{key_version.strip()}".encode("utf-8")
+    pt = AESGCM(key).decrypt(nonce, ct, aad)
+    return pt.decode("utf-8")
+
+
+def rotate_sensitive_answer_ciphertext(
+    ciphertext: str,
+    *,
+    old_key_version: str,
+    application_id: str,
+    question_key: str,
+    settings: Settings | None = None,
+) -> tuple[str, str]:
+    """Re-encrypt an existing sensitive answer under the active ENCRYPTION_KEY_VERSION."""
+    plaintext = decrypt_sensitive_answer(
+        ciphertext,
+        key_version=old_key_version,
+        application_id=application_id,
+        question_key=question_key,
+        settings=settings,
+    )
+    return encrypt_sensitive_answer(
+        plaintext,
+        application_id=application_id,
+        question_key=question_key,
+        settings=settings,
+    )

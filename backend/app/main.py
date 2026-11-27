@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from app.api.routes.applications import router as applications_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.profile import router as profile_router
@@ -51,6 +52,7 @@ app.include_router(resume_router)
 app.include_router(resumes_intelligence_router)
 app.include_router(jobs_router)
 app.include_router(workflows_router)
+app.include_router(applications_router)
 
 
 @app.get("/health", tags=["system"])
