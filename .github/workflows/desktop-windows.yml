@@ -34,7 +34,7 @@ jobs:
       - name: Install desktop dependencies & run cargo check
         working-directory: apps/desktop
         run: |
-          npm install
+          npm ci
           npm test
           cargo check --manifest-path src-tauri/Cargo.toml
 
